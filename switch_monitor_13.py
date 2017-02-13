@@ -23,52 +23,34 @@ from ryu.lib.packet import ethernet
 from ryu.lib.packet import ipv4
 from ryu.lib.packet import ether_types
 
-
 class SwitchMonitor13(app_manager.RyuApp):
     OFP_VERSIONS = [ofproto_v1_3.OFP_VERSION]
 
     def __init__(self, *args, **kwargs):
         super(SwitchMonitor13, self).__init__(*args, **kwargs)
-        self.ip_to_table = {}
-        self.flow_table = {}
+        self.ipv4_flow = {}
+        self.table_flow = {}
 
     @set_ev_cls(ofp_event.EventOFPSwitchFeatures, CONFIG_DISPATCHER)
     def switch_features_handler(self, ev):
         datapath = ev.msg.datapath
         ofproto = datapath.ofproto
-        parser = datapath.ofproto_parser
-
-        match = parser.OFPMatch(eth_type=0x0800)
-        actions = [parser.OFPActionOutput(ofproto.OFPP_CONTROLLER, 256)]
-        self.add_flow(datapath, 1, match, actions)
-
-        match = parser.OFPMatch()
-        actions = [parser.OFPActionOutput(ofproto.OFPP_FLOOD)]
-        self.add_flow(datapath, 0, match, actions)
-
-    def add_monitor_flow(self, datapath, ipv4):
-        ofproto = datapath.ofproto
-        parser = datapath.ofproto_parser
         dpid = datapath.id
-        table_id = int(ipv4[ipv4.rfind(".")+1:]);
-        if table_id == 0 or table_id == 255:
-            table_id = 1
 
-        self.logger.info("add monitor flow to table %d", table_id)
+        self.ipv4_flow.setdefault(dpid, {})
+        self.table_flow.setdefault(dpid, {})
 
-        inst = [parser.OFPInstructionGotoTable(table_id)]
-        match = parser.OFPMatch(eth_type=0x0800, ipv4_src=ipv4)
-        self.add_flow(datapath, 2, match, None, None, 0, inst)
+        self.delete_table_flow(datapath, ofproto.OFPTT_ALL)
+        self.install_table_flow(datapath, 0)
 
-        self.ip_to_table[dpid][ipv4] = table_id
-
-    def add_flow(self, datapath, priority, match, actions, buffer_id=None, table_id=0, inst=None):
+    def add_flow(self, datapath, priority, match, actions, inst=None,
+                 table_id=0, buffer_id=None):
         ofproto = datapath.ofproto
         parser = datapath.ofproto_parser
-        self.logger.info("add flow")
+        self.logger.info("add flow to %s", table_id)
         if not inst:
-        	inst = [parser.OFPInstructionActions(ofproto.OFPIT_APPLY_ACTIONS,
-            	                                 actions)]
+            inst = [parser.OFPInstructionActions(ofproto.OFPIT_APPLY_ACTIONS,
+                                                 actions)]
         if buffer_id:
             mod = parser.OFPFlowMod(datapath=datapath, buffer_id=buffer_id,
                                     priority=priority, match=match,
@@ -79,29 +61,66 @@ class SwitchMonitor13(app_manager.RyuApp):
                                     table_id=table_id)
         datapath.send_msg(mod)
 
-    def packet_flood(self, datapath, msg):
-        in_port = msg.match['in_port']
+    def delete_table_flow(self, datapath, table_id):
         ofproto = datapath.ofproto
         parser = datapath.ofproto_parser
-        data = None
-        if msg.buffer_id == ofproto.OFP_NO_BUFFER:
-            data = msg.data
-        actions = [parser.OFPActionOutput(ofproto.OFPP_FLOOD)]
-        out = parser.OFPPacketOut(datapath=datapath, buffer_id=msg.buffer_id,
-                                  in_port=in_port, actions=actions, data=data)
-        datapath.send_msg(out)
 
-    def add_traffic_flow(self, datapath, ipv4_src, ipv4_dst):
+        command=ofproto.OFPFC_DELETE
+        match = parser.OFPMatch()
+        out_port = ofproto.OFPP_ANY
+        out_group = ofproto.OFPG_ANY
+
+        mod = parser.OFPFlowMod(datapath, 0, 0, table_id, command,
+                                out_port=out_port, out_group=out_group,
+                                match=match)
+        datapath.send_msg(mod)
+
+    def install_table_flow(self, datapath, table_id):
         ofproto = datapath.ofproto
         parser = datapath.ofproto_parser
         dpid = datapath.id
 
-        table_id = self.ip_to_table[dpid][ipv4_src]
+        if table_id in self.table_flow[dpid]:
+            return
+
+        self.table_flow[dpid][table_id] = table_id
+
+        match = parser.OFPMatch(eth_type=0x0800)
+        actions = [parser.OFPActionOutput(ofproto.OFPP_CONTROLLER, 256)]
+        self.add_flow(datapath, 1, match, actions, None, table_id)
+
+        if table_id == 0:
+            match = parser.OFPMatch()
+            actions = [parser.OFPActionOutput(ofproto.OFPP_FLOOD)]
+            self.add_flow(datapath, 0, match, actions) 
+        else:
+            mask = ("0.0.0."+str(table_id), "0.0.0.255")
+            match = parser.OFPMatch(eth_type=0x0800, ipv4_src=mask)
+            inst = [parser.OFPInstructionGotoTable(table_id)]
+            self.add_flow(datapath, 10, match, None, inst)
+
+    def add_traffic_flow(self, msg, table_id, ipv4_src, ipv4_dst):
+        datapath = msg.datapath
+        ofproto = datapath.ofproto
+        parser = datapath.ofproto_parser
+        dpid = datapath.id
+        in_port = msg.match['in_port']
+        buffer_id = None
+
+        if msg.buffer_id != ofproto.OFP_NO_BUFFER:
+            buffer_id = msg.buffer_id
+
         match = parser.OFPMatch(eth_type=0x0800, ipv4_src=ipv4_src, ipv4_dst=ipv4_dst)
         actions = [parser.OFPActionOutput(ofproto.OFPP_FLOOD)]
-        self.add_flow(datapath, 2, match, actions, None, table_id)
+        self.add_flow(datapath, 2, match, actions, None, table_id, buffer_id)
 
-        self.flow_table[dpid][ipv4_src][ipv4_dst] = table_id
+        if not buffer_id:
+            actions = [parser.OFPActionOutput(ofproto.OFPP_FLOOD)]
+            out = parser.OFPPacketOut(datapath=datapath, buffer_id=msg.buffer_id,
+                                      in_port=in_port, actions=actions, data=msg.data)
+            datapath.send_msg(out)
+
+        self.ipv4_flow[dpid][ipv4_src][ipv4_dst] = table_id
 
     @set_ev_cls(ofp_event.EventOFPPacketIn, MAIN_DISPATCHER)
     def _packet_in_handler(self, ev):
@@ -112,8 +131,7 @@ class SwitchMonitor13(app_manager.RyuApp):
                               ev.msg.msg_len, ev.msg.total_len)
         msg = ev.msg
         datapath = msg.datapath
-        ofproto = datapath.ofproto
-        parser = datapath.ofproto_parser
+        dpid = datapath.id
         in_port = msg.match['in_port']
 
         pkt = packet.Packet(msg.data)
@@ -123,21 +141,18 @@ class SwitchMonitor13(app_manager.RyuApp):
         if eth.ethertype != ether_types.ETH_TYPE_IP:
             return
 
-        ip_pkt = pkt.get_protocols(ipv4.ipv4)[0]
-        ipv4_src = ip_pkt.src
-        ipv4_dst = ip_pkt.dst
+        ipv4_pkt = pkt.get_protocols(ipv4.ipv4)[0]
+        ipv4_src = ipv4_pkt.src
+        ipv4_dst = ipv4_pkt.dst
 
-        dpid = datapath.id
-        self.ip_to_table.setdefault(dpid, {})
-        self.flow_table.setdefault(dpid, {})
+        self.logger.info("IPv4 packet in %s %s %s %s", dpid, ipv4_src, ipv4_dst, in_port)
 
-        self.logger.info("packet in %s %s %s %s", dpid, ipv4_src, ipv4_dst, in_port)
+        table_id = int(ipv4_src[ipv4_src.rfind(".")+1:]);
+        if table_id not in self.table_flow[dpid]:
+            self.install_table_flow(datapath, table_id)
 
-        if ipv4_src not in self.ip_to_table[dpid]:
-            self.add_monitor_flow(datapath, ipv4_src)
+        if ipv4_src not in self.ipv4_flow[dpid]:
+            self.ipv4_flow[dpid].setdefault(ipv4_src, {})
 
-        self.flow_table[dpid].setdefault(ipv4_src, {})
-        if ipv4_dst not in self.flow_table[dpid][ipv4_src]:
-            self.add_traffic_flow(datapath, ipv4_src, ipv4_dst)
-
-        self.packet_flood(datapath, msg)
+        if ipv4_dst not in self.ipv4_flow[dpid][ipv4_src]:
+            self.add_traffic_flow(msg, table_id, ipv4_src, ipv4_dst)
