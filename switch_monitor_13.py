@@ -20,53 +20,37 @@ from ryu.controller.handler import set_ev_cls
 from ryu.ofproto import ofproto_v1_3
 from ryu.lib.packet import packet
 from ryu.lib.packet import ethernet
+from ryu.lib.packet import ipv4
 from ryu.lib.packet import ether_types
-
 
 class SwitchMonitor13(app_manager.RyuApp):
     OFP_VERSIONS = [ofproto_v1_3.OFP_VERSION]
 
     def __init__(self, *args, **kwargs):
         super(SwitchMonitor13, self).__init__(*args, **kwargs)
-        self.mac_to_port = {}
+        self.ipv4_flow = {}
+        self.table_flow = {}
 
     @set_ev_cls(ofp_event.EventOFPSwitchFeatures, CONFIG_DISPATCHER)
     def switch_features_handler(self, ev):
         datapath = ev.msg.datapath
         ofproto = datapath.ofproto
-        parser = datapath.ofproto_parser
+        dpid = datapath.id
 
-        # install table-miss flow entry
-        #
-        # We specify NO BUFFER to max_len of the output action due to
-        # OVS bug. At this moment, if we specify a lesser number, e.g.,
-        # 128, OVS will send Packet-In with invalid buffer_id and
-        # truncated packet data. In that case, we cannot output packets
-        # correctly.  The bug has been fixed in OVS v2.1.0.
-        match = parser.OFPMatch()
-        actions = [parser.OFPActionOutput(ofproto.OFPP_CONTROLLER,
-                                          ofproto.OFPCML_NO_BUFFER)]
-        #self.add_flow(datapath, 0, match, actions)
-        self.add_flow(datapath, 0, match, actions, None, 1)
+        self.ipv4_flow.setdefault(dpid, {})
+        self.table_flow.setdefault(dpid, {})
 
-        match = parser.OFPMatch(eth_type=0x0800)
-        inst = [parser.OFPInstructionGotoTable(1)]
-        self.add_flow(datapath, 2, match, None, None, 0, inst)
+        self.delete_table_flow(datapath, ofproto.OFPTT_ALL)
+        self.install_table_flow(datapath, 0)
 
-        match = parser.OFPMatch()
-        actions = [parser.OFPActionOutput(ofproto.OFPP_FLOOD)]
-        #self.add_flow(datapath, 0, match, actions)
-        self.add_flow(datapath, 0, match, actions)
-
-
-
-    def add_flow(self, datapath, priority, match, actions, buffer_id=None, table_id=0, inst=None):
+    def add_flow(self, datapath, priority, match, actions, inst=None,
+                 table_id=0, buffer_id=None):
         ofproto = datapath.ofproto
         parser = datapath.ofproto_parser
-        self.logger.info("add flow")
+        self.logger.info("add flow to %s", table_id)
         if not inst:
-        	inst = [parser.OFPInstructionActions(ofproto.OFPIT_APPLY_ACTIONS,
-            	                                 actions)]
+            inst = [parser.OFPInstructionActions(ofproto.OFPIT_APPLY_ACTIONS,
+                                                 actions)]
         if buffer_id:
             mod = parser.OFPFlowMod(datapath=datapath, buffer_id=buffer_id,
                                     priority=priority, match=match,
@@ -77,6 +61,67 @@ class SwitchMonitor13(app_manager.RyuApp):
                                     table_id=table_id)
         datapath.send_msg(mod)
 
+    def delete_table_flow(self, datapath, table_id):
+        ofproto = datapath.ofproto
+        parser = datapath.ofproto_parser
+
+        command=ofproto.OFPFC_DELETE
+        match = parser.OFPMatch()
+        out_port = ofproto.OFPP_ANY
+        out_group = ofproto.OFPG_ANY
+
+        mod = parser.OFPFlowMod(datapath, 0, 0, table_id, command,
+                                out_port=out_port, out_group=out_group,
+                                match=match)
+        datapath.send_msg(mod)
+
+    def install_table_flow(self, datapath, table_id):
+        ofproto = datapath.ofproto
+        parser = datapath.ofproto_parser
+        dpid = datapath.id
+
+        if table_id in self.table_flow[dpid]:
+            return
+
+        self.table_flow[dpid][table_id] = table_id
+
+        match = parser.OFPMatch(eth_type=0x0800)
+        actions = [parser.OFPActionOutput(ofproto.OFPP_CONTROLLER, 256)]
+        self.add_flow(datapath, 1, match, actions, None, table_id)
+
+        if table_id == 0:
+            match = parser.OFPMatch()
+            actions = [parser.OFPActionOutput(ofproto.OFPP_FLOOD)]
+            self.add_flow(datapath, 0, match, actions) 
+        else:
+            mask = ("0.0.0."+str(table_id), "0.0.0.255")
+            match = parser.OFPMatch(eth_type=0x0800, ipv4_src=mask)
+            inst = [parser.OFPInstructionGotoTable(table_id)]
+            self.add_flow(datapath, 10, match, None, inst)
+
+    def add_traffic_flow(self, msg, table_id, ipv4_src, ipv4_dst):
+        datapath = msg.datapath
+        ofproto = datapath.ofproto
+        parser = datapath.ofproto_parser
+        dpid = datapath.id
+        in_port = msg.match['in_port']
+        buffer_id = None
+
+        if msg.buffer_id != ofproto.OFP_NO_BUFFER:
+            buffer_id = msg.buffer_id
+
+        match = parser.OFPMatch(eth_type=0x0800, ipv4_src=ipv4_src, ipv4_dst=ipv4_dst)
+        actions = [parser.OFPActionOutput(ofproto.OFPP_FLOOD)]
+        self.add_flow(datapath, 2, match, actions, None, table_id, buffer_id)
+
+        if not buffer_id:
+            actions = [parser.OFPActionOutput(ofproto.OFPP_FLOOD)]
+            out = parser.OFPPacketOut(datapath=datapath, buffer_id=msg.buffer_id,
+                                      in_port=in_port, actions=actions, data=msg.data)
+            datapath.send_msg(out)
+
+        self.ipv4_flow[dpid][ipv4_src][ipv4_dst] = table_id
+
     @set_ev_cls(ofp_event.EventOFPPacketIn, MAIN_DISPATCHER)
     def _packet_in_handler(self, ev):
         # If you hit this you might want to increase
@@ -86,49 +131,28 @@ class SwitchMonitor13(app_manager.RyuApp):
                               ev.msg.msg_len, ev.msg.total_len)
         msg = ev.msg
         datapath = msg.datapath
-        ofproto = datapath.ofproto
-        parser = datapath.ofproto_parser
+        dpid = datapath.id
         in_port = msg.match['in_port']
 
         pkt = packet.Packet(msg.data)
         eth = pkt.get_protocols(ethernet.ethernet)[0]
 
-        if eth.ethertype == ether_types.ETH_TYPE_LLDP:
-            # ignore lldp packet
+        # ignore non-ip packet
+        if eth.ethertype != ether_types.ETH_TYPE_IP:
             return
-        dst = eth.dst
-        src = eth.src
 
-        dpid = datapath.id
-        self.mac_to_port.setdefault(dpid, {})
+        ipv4_pkt = pkt.get_protocols(ipv4.ipv4)[0]
+        ipv4_src = ipv4_pkt.src
+        ipv4_dst = ipv4_pkt.dst
 
-        self.logger.info("packet in %s %s %s %s", dpid, src, dst, in_port)
+        self.logger.info("IPv4 packet in %s %s %s %s", dpid, ipv4_src, ipv4_dst, in_port)
 
-        # learn a mac address to avoid FLOOD next time.
-        self.mac_to_port[dpid][src] = in_port
+        table_id = int(ipv4_src[ipv4_src.rfind(".")+1:]);
+        if table_id not in self.table_flow[dpid]:
+            self.install_table_flow(datapath, table_id)
 
-        if dst in self.mac_to_port[dpid]:
-            out_port = self.mac_to_port[dpid][dst]
-        else:
-            out_port = ofproto.OFPP_FLOOD
+        if ipv4_src not in self.ipv4_flow[dpid]:
+            self.ipv4_flow[dpid].setdefault(ipv4_src, {})
 
-        actions = [parser.OFPActionOutput(out_port)]
-
-        # install a flow to avoid packet_in next time
-        if out_port != ofproto.OFPP_FLOOD:
-            match = parser.OFPMatch(in_port=in_port, eth_dst=dst)
-            # verify if we have a valid buffer_id, if yes avoid to send both
-            # flow_mod & packet_out
-            if msg.buffer_id != ofproto.OFP_NO_BUFFER:
-                self.add_flow(datapath, 1, match, actions, msg.buffer_id, 1)
-                return
-            else:
-                self.add_flow(datapath, 1, match, actions, None, 1)
-        self.logger.info("flooding packet")
-        data = None
-        if msg.buffer_id == ofproto.OFP_NO_BUFFER:
-            data = msg.data
-
-        out = parser.OFPPacketOut(datapath=datapath, buffer_id=msg.buffer_id,
-                                  in_port=in_port, actions=actions, data=data)
-        datapath.send_msg(out)
+        if ipv4_dst not in self.ipv4_flow[dpid][ipv4_src]:
+            self.add_traffic_flow(msg, table_id, ipv4_src, ipv4_dst)
