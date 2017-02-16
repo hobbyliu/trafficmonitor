@@ -22,6 +22,9 @@ from ryu.lib.packet import packet
 from ryu.lib.packet import ethernet
 from ryu.lib.packet import ipv4
 from ryu.lib.packet import ether_types
+import sqlite3
+import netaddr
+import time
 
 class SwitchMonitor13(app_manager.RyuApp):
     OFP_VERSIONS = [ofproto_v1_3.OFP_VERSION]
@@ -30,6 +33,15 @@ class SwitchMonitor13(app_manager.RyuApp):
         super(SwitchMonitor13, self).__init__(*args, **kwargs)
         self.ipv4_flow = {}
         self.table_flow = {}
+        self.dbconn = sqlite3.connect("traffic.db")
+        self.dbconn.execute('''CREATE TABLE IF NOT EXISTS TRAFFIC
+                               (ID     integer primary key autoincrement,
+                                SRC    INT    NOT NULL,
+                                DST    INT    NOT NULL,
+                                SECS   INT    NOT NULL,
+                                PKTS   INT    NOT NULL,
+                                BYTES  INT    NOT NULL,
+                                TIME   INT    NOT NULL);''')
 
     @set_ev_cls(ofp_event.EventOFPSwitchFeatures, CONFIG_DISPATCHER)
     def switch_features_handler(self, ev):
@@ -140,6 +152,12 @@ class SwitchMonitor13(app_manager.RyuApp):
         ipv4_dst = match['ipv4_dst']
 
         self.ipv4_flow[dpid][ipv4_src].pop(ipv4_dst, None)
+        self.dbconn.execute("INSERT into TRAFFIC values(NULL,?,?,?,?,?,?)",
+                            (int(netaddr.IPAddress(ipv4_src)),
+                             int(netaddr.IPAddress(ipv4_dst)),
+                             msg.duration_sec, msg.packet_count,
+                             msg.byte_count, int(time.time())))
+        self.dbconn.commit()
         self.logger.info("%.15s -> %.15s %4d seconds %4d packets %d bytes",
                          ipv4_src, ipv4_dst, msg.duration_sec,
                          msg.packet_count, msg.byte_count)
