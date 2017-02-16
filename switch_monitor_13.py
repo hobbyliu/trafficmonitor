@@ -44,7 +44,8 @@ class SwitchMonitor13(app_manager.RyuApp):
         self.install_table_flow(datapath, 0)
 
     def add_flow(self, datapath, priority, match, actions, inst=None,
-                 table_id=0, buffer_id=None):
+                 table_id=0, buffer_id=None, idle_timeout=0,
+                 hard_timeout=0, flags=0):
         ofproto = datapath.ofproto
         parser = datapath.ofproto_parser
         self.logger.info("add flow to %s", table_id)
@@ -54,11 +55,14 @@ class SwitchMonitor13(app_manager.RyuApp):
         if buffer_id:
             mod = parser.OFPFlowMod(datapath=datapath, buffer_id=buffer_id,
                                     priority=priority, match=match,
+                                    idle_timeout=idle_timeout,
+                                    hard_timeout=hard_timeout, flags=flags,
                                     table_id=table_id, instructions=inst)
         else:
             mod = parser.OFPFlowMod(datapath=datapath, priority=priority,
                                     match=match, instructions=inst,
-                                    table_id=table_id)
+                                    idle_timeout=idle_timeout, flags=flags,
+                                    hard_timeout=hard_timeout, table_id=table_id)
         datapath.send_msg(mod)
 
     def delete_table_flow(self, datapath, table_id):
@@ -112,15 +116,33 @@ class SwitchMonitor13(app_manager.RyuApp):
 
         match = parser.OFPMatch(eth_type=0x0800, ipv4_src=ipv4_src, ipv4_dst=ipv4_dst)
         actions = [parser.OFPActionOutput(ofproto.OFPP_FLOOD)]
-        self.add_flow(datapath, 2, match, actions, None, table_id, buffer_id)
+        self.add_flow(datapath, 2, match, actions, None, table_id,
+                      buffer_id, 10, 600, ofproto.OFPFF_SEND_FLOW_REM)
 
         if not buffer_id:
             actions = [parser.OFPActionOutput(ofproto.OFPP_FLOOD)]
             out = parser.OFPPacketOut(datapath=datapath, buffer_id=msg.buffer_id,
-                                      in_port=in_port, actions=actions, data=msg.data)
+                                      in_port=in_port, actions=actions,
+                                      data=msg.data)
             datapath.send_msg(out)
 
         self.ipv4_flow[dpid][ipv4_src][ipv4_dst] = table_id
+
+    @set_ev_cls(ofp_event.EventOFPFlowRemoved, MAIN_DISPATCHER)
+    def flow_removed_handler(self, ev):
+        msg = ev.msg
+        datapath = msg.datapath
+        match = msg.match
+        ofproto = datapath.ofproto
+        dpid = datapath.id
+
+        ipv4_src = match['ipv4_src']
+        ipv4_dst = match['ipv4_dst']
+
+        self.ipv4_flow[dpid][ipv4_src].pop(ipv4_dst, None)
+        self.logger.info("%.15s -> %.15s %4d seconds %4d packets %d bytes",
+                         ipv4_src, ipv4_dst, msg.duration_sec,
+                         msg.packet_count, msg.byte_count)
 
     @set_ev_cls(ofp_event.EventOFPPacketIn, MAIN_DISPATCHER)
     def _packet_in_handler(self, ev):
