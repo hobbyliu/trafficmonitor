@@ -38,8 +38,9 @@ class SwitchMonitor13(app_manager.RyuApp):
         self.dbconn.execute('''CREATE TABLE IF NOT EXISTS TRAFFIC
                                (ID     integer primary key autoincrement,
                                 SRC    INT    NOT NULL,
-                                PORT   INT    NOT NULL,
+                                SPORT  INT    NOT NULL,
                                 DST    INT    NOT NULL,
+                                DPORT  INT    NOT NULL,
                                 SECS   INT    NOT NULL,
                                 PKTS   INT    NOT NULL,
                                 BYTES  INT    NOT NULL,
@@ -121,7 +122,7 @@ class SwitchMonitor13(app_manager.RyuApp):
             inst = [parser.OFPInstructionGotoTable(table_id)]
             self.add_flow(datapath, 10, match, None, inst)
 
-    def add_traffic_flow(self, msg, table_id, ipv4_src, ipv4_dst, port_src):
+    def add_traffic_flow(self, msg, table_id, ipv4_src, ipv4_dst, port_src, port_dst):
         datapath = msg.datapath
         ofproto = datapath.ofproto
         parser = datapath.ofproto_parser
@@ -144,7 +145,7 @@ class SwitchMonitor13(app_manager.RyuApp):
                                       data=msg.data)
             datapath.send_msg(out)
 
-        self.ipv4_flow[dpid][ipv4_src][ipv4_dst] = port_src
+        self.ipv4_flow[dpid][ipv4_src][ipv4_dst] = (port_src, port_dst)
 
     @set_ev_cls(ofp_event.EventOFPFlowRemoved, MAIN_DISPATCHER)
     def flow_removed_handler(self, ev):
@@ -156,13 +157,13 @@ class SwitchMonitor13(app_manager.RyuApp):
 
         ipv4_src = match['ipv4_src']
         ipv4_dst = match['ipv4_dst']
-        ipv4_port = 0
+        (port_src, port_dst) = (0, 0)
 
         if ipv4_src in self.ipv4_flow[dpid] and ipv4_dst in self.ipv4_flow[dpid][ipv4_src]:
-            ipv4_port = self.ipv4_flow[dpid][ipv4_src].pop(ipv4_dst, 0)
-        self.dbconn.execute("INSERT into TRAFFIC values(NULL,?,?,?,?,?,?,?)",
-                            (int(netaddr.IPAddress(ipv4_src)), ipv4_port,
-                             int(netaddr.IPAddress(ipv4_dst)),
+            (port_src, port_dst) = self.ipv4_flow[dpid][ipv4_src].pop(ipv4_dst, (0,0))
+        self.dbconn.execute("INSERT into TRAFFIC values(NULL,?,?,?,?,?,?,?,?)",
+                            (int(netaddr.IPAddress(ipv4_src)), port_src,
+                             int(netaddr.IPAddress(ipv4_dst)), port_dst,
                              msg.duration_sec, msg.packet_count,
                              msg.byte_count, int(time.time())))
         self.dbconn.commit()
@@ -212,4 +213,5 @@ class SwitchMonitor13(app_manager.RyuApp):
             self.install_table_flow(datapath, table_id)
 
         if ipv4_dst not in self.ipv4_flow[dpid][ipv4_src]:
-            self.add_traffic_flow(msg, table_id, ipv4_src, ipv4_dst, port_src)
+            self.add_traffic_flow(msg, table_id, ipv4_src, ipv4_dst,
+                                  port_src, port_dst)
