@@ -110,7 +110,11 @@ class SwitchMonitor13(app_manager.RyuApp):
         if table_id == 0:
             match = parser.OFPMatch()
             actions = [parser.OFPActionOutput(ofproto.OFPP_FLOOD)]
-            self.add_flow(datapath, 0, match, actions) 
+            self.add_flow(datapath, 0, match, actions)
+
+            match = parser.OFPMatch(eth_type=0x0800, ipv4_dst="255.255.255.255")
+            actions = [parser.OFPActionOutput(ofproto.OFPP_FLOOD)]
+            self.add_flow(datapath, 20, match, actions)
         else:
             mask = ("0.0.0."+str(table_id), "0.0.0.255")
             match = parser.OFPMatch(eth_type=0x0800, ipv4_src=mask)
@@ -131,7 +135,7 @@ class SwitchMonitor13(app_manager.RyuApp):
         match = parser.OFPMatch(eth_type=0x0800, ipv4_src=ipv4_src, ipv4_dst=ipv4_dst)
         actions = [parser.OFPActionOutput(ofproto.OFPP_FLOOD)]
         self.add_flow(datapath, 2, match, actions, None, table_id,
-                      buffer_id, 10, 600, ofproto.OFPFF_SEND_FLOW_REM)
+                      buffer_id, 60, 600, ofproto.OFPFF_SEND_FLOW_REM)
 
         if not buffer_id:
             actions = [parser.OFPActionOutput(ofproto.OFPP_FLOOD)]
@@ -152,10 +156,12 @@ class SwitchMonitor13(app_manager.RyuApp):
 
         ipv4_src = match['ipv4_src']
         ipv4_dst = match['ipv4_dst']
+        ipv4_port = 0
 
-        port = self.ipv4_flow[dpid][ipv4_src].pop(ipv4_dst, 0)
+        if ipv4_src in self.ipv4_flow[dpid] and ipv4_dst in self.ipv4_flow[dpid][ipv4_src]:
+            ipv4_port = self.ipv4_flow[dpid][ipv4_src].pop(ipv4_dst, 0)
         self.dbconn.execute("INSERT into TRAFFIC values(NULL,?,?,?,?,?,?,?)",
-                            (int(netaddr.IPAddress(ipv4_src)), port,
+                            (int(netaddr.IPAddress(ipv4_src)), ipv4_port,
                              int(netaddr.IPAddress(ipv4_dst)),
                              msg.duration_sec, msg.packet_count,
                              msg.byte_count, int(time.time())))
