@@ -17,7 +17,7 @@ from ryu.base import app_manager
 from ryu.controller import ofp_event
 from ryu.controller.handler import CONFIG_DISPATCHER, MAIN_DISPATCHER
 from ryu.controller.handler import set_ev_cls
-from ryu.ofproto import ofproto_v1_3
+from ryu.ofproto import ofproto_v1_3, inet
 from ryu.lib.packet import packet
 from ryu.lib.packet import ethernet
 from ryu.lib.packet import ipv4, tcp, udp
@@ -26,6 +26,8 @@ import sqlite3
 import netaddr
 import time
 import ipaddress
+
+nameserver = "172.19.41.70"
 
 class SwitchMonitor13(app_manager.RyuApp):
     OFP_VERSIONS = [ofproto_v1_3.OFP_VERSION]
@@ -57,6 +59,16 @@ class SwitchMonitor13(app_manager.RyuApp):
 
         self.delete_table_flow(datapath, ofproto.OFPTT_ALL)
         self.install_table_flow(datapath, 0)
+        self.install_dns_flow(datapath)
+
+    def install_dns_flow(self, datapath):
+        global nameserver
+        ofproto = datapath.ofproto
+        parser = datapath.ofproto_parser
+        match = parser.OFPMatch(eth_type=0x0800, ipv4_src=nameserver,
+                                ip_proto=inet.IPPROTO_UDP, udp_src=53)
+        actions = [parser.OFPActionOutput(ofproto.OFPP_CONTROLLER, 256)]
+        self.add_flow(datapath, 20, match, actions)
 
     def add_flow(self, datapath, priority, match, actions, inst=None,
                  table_id=0, buffer_id=None, idle_timeout=0,
@@ -171,6 +183,22 @@ class SwitchMonitor13(app_manager.RyuApp):
                          ipv4_src, ipv4_dst, msg.duration_sec,
                          msg.packet_count, msg.byte_count)
 
+    def parse_dns(self, msg):
+        self.logger.info("parse out dns data")
+        datapath = msg.datapath
+        ofproto = datapath.ofproto
+        parser = datapath.ofproto_parser
+        in_port = msg.match['in_port']
+
+        data = None
+        if msg.buffer_id == ofproto.OFP_NO_BUFFER:
+            data = msg.data
+
+        actions = [parser.OFPActionOutput(ofproto.OFPP_FLOOD)]
+        out = parser.OFPPacketOut(datapath=datapath, buffer_id=msg.buffer_id,
+                                  in_port=in_port, actions=actions, data=data)
+        datapath.send_msg(out)
+
     @set_ev_cls(ofp_event.EventOFPPacketIn, MAIN_DISPATCHER)
     def _packet_in_handler(self, ev):
         # If you hit this you might want to increase
@@ -207,6 +235,9 @@ class SwitchMonitor13(app_manager.RyuApp):
 
         self.logger.info("IPv4 packet in %s %s(%s) %s(%s) %s", dpid, ipv4_src,
                         port_src, ipv4_dst, port_dst, in_port)
+
+        if ipv4_src == nameserver and port_src == 53:
+            return self.parse_dns(msg)
 
         table_id = int(ipv4_src[ipv4_src.rfind(".")+1:]);
         if table_id not in self.table_flow[dpid]:
