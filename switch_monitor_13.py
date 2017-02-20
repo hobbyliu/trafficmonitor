@@ -22,6 +22,8 @@ from ryu.lib.packet import packet
 from ryu.lib.packet import ethernet
 from ryu.lib.packet import ipv4, tcp, udp
 from ryu.lib.packet import ether_types
+from ryu.utils import hex_array
+from dnslib import DNSRecord, binascii
 import sqlite3
 import netaddr
 import time
@@ -67,7 +69,8 @@ class SwitchMonitor13(app_manager.RyuApp):
         parser = datapath.ofproto_parser
         match = parser.OFPMatch(eth_type=0x0800, ipv4_src=nameserver,
                                 ip_proto=inet.IPPROTO_UDP, udp_src=53)
-        actions = [parser.OFPActionOutput(ofproto.OFPP_CONTROLLER, 256)]
+        actions = [parser.OFPActionOutput(ofproto.OFPP_CONTROLLER,
+                                         ofproto.OFPCML_NO_BUFFER)]
         self.add_flow(datapath, 20, match, actions)
 
     def add_flow(self, datapath, priority, match, actions, inst=None,
@@ -184,11 +187,15 @@ class SwitchMonitor13(app_manager.RyuApp):
                          msg.packet_count, msg.byte_count)
 
     def parse_dns(self, msg):
-        self.logger.info("parse out dns data")
         datapath = msg.datapath
         ofproto = datapath.ofproto
         parser = datapath.ofproto_parser
         in_port = msg.match['in_port']
+
+        pkt = packet.Packet(msg.data)
+        dns = DNSRecord.parse(pkt.protocols[-1])
+
+        self.logger.info(dns)
 
         data = None
         if msg.buffer_id == ofproto.OFP_NO_BUFFER:
