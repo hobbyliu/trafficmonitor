@@ -38,12 +38,15 @@ class SwitchMonitor13(app_manager.RyuApp):
         super(SwitchMonitor13, self).__init__(*args, **kwargs)
         self.ipv4_flow = {}
         self.table_flow = {}
+        self.dnscache = {}
         self.dbconn = sqlite3.connect("traffic.db")
         self.dbconn.execute('''CREATE TABLE IF NOT EXISTS TRAFFIC
                                (ID     integer primary key autoincrement,
                                 SRC    INT    NOT NULL,
+                                SDNS   string NOT NULL,
                                 SPORT  INT    NOT NULL,
                                 DST    INT    NOT NULL,
+                                DDNS   string NOT NULL,
                                 DPORT  INT    NOT NULL,
                                 SECS   INT    NOT NULL,
                                 PKTS   INT    NOT NULL,
@@ -174,16 +177,19 @@ class SwitchMonitor13(app_manager.RyuApp):
         ipv4_dst = match['ipv4_dst']
         (port_src, port_dst) = (0, 0)
 
+        dns_src = self.dnscache.get(ipv4_src, "")
+        dns_dst = self.dnscache.get(ipv4_dst, "")
+
         if ipv4_src in self.ipv4_flow[dpid] and ipv4_dst in self.ipv4_flow[dpid][ipv4_src]:
             (port_src, port_dst) = self.ipv4_flow[dpid][ipv4_src].pop(ipv4_dst, (0,0))
-        self.dbconn.execute("INSERT into TRAFFIC values(NULL,?,?,?,?,?,?,?,?)",
-                            (int(netaddr.IPAddress(ipv4_src)), port_src,
-                             int(netaddr.IPAddress(ipv4_dst)), port_dst,
+        self.dbconn.execute("INSERT into TRAFFIC values(NULL,?,?,?,?,?,?,?,?,?,?)",
+                            (int(netaddr.IPAddress(ipv4_src)), dns_src, port_src,
+                             int(netaddr.IPAddress(ipv4_dst)), dns_dst, port_dst,
                              msg.duration_sec, msg.packet_count,
                              msg.byte_count, int(time.time())))
         self.dbconn.commit()
-        self.logger.info("%.15s -> %.15s %4d seconds %4d packets %d bytes",
-                         ipv4_src, ipv4_dst, msg.duration_sec,
+        self.logger.info("%.15s(%s) -> %.15s(%s) %4d seconds %4d packets %d bytes",
+                         ipv4_src, dns_src, ipv4_dst, dns_dst, msg.duration_sec,
                          msg.packet_count, msg.byte_count)
 
     def parse_dns(self, msg):
@@ -195,7 +201,13 @@ class SwitchMonitor13(app_manager.RyuApp):
         pkt = packet.Packet(msg.data)
         dns = DNSRecord.parse(pkt.protocols[-1])
 
-        self.logger.info(dns)
+        cname = None
+        for q in dns.questions:
+            cname = str(q.get_qname())
+            break
+        if cname:
+            for r in dns.rr:
+                self.dnscache[str(r.rdata)] = cname
 
         data = None
         if msg.buffer_id == ofproto.OFP_NO_BUFFER:
