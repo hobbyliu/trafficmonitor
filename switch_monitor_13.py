@@ -134,6 +134,12 @@ class SwitchMonitor13(app_manager.RyuApp):
             match = parser.OFPMatch(eth_type=0x0800, ipv4_dst="255.255.255.255")
             actions = [parser.OFPActionOutput(ofproto.OFPP_FLOOD)]
             self.add_flow(datapath, 20, match, actions)
+
+            match = parser.OFPMatch(eth_type=0x0800, ipv4_dst="1.1.1.1")
+            actions = []
+            actions.append(parser.OFPActionSetField(eth_dst=dpid))
+            actions.append(parser.OFPActionOutput(ofproto.OFPP_NORMAL))
+            self.add_flow(datapath, 100, match, actions)
         else:
             mask = ("0.0.0."+str(table_id), "0.0.0.255")
             match = parser.OFPMatch(eth_type=0x0800, ipv4_src=mask)
